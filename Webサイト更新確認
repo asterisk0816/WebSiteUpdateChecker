@@ -1,0 +1,134 @@
+/**
+ * Google Apps Script: Web Site Change Notifier (List in Code with Tags Version)
+ *
+ * スクリプト内に定義されたURLとタグ(名前)のリストを定期的にチェックし、
+ * サイト内容（HTML）のMD5ハッシュ値を比較して変更があった場合に、
+ * タグを含む件名でGmail通知します。
+ */
+
+// --- 設定項目 ---
+// 監視対象のURLとタグ(名前)のリスト
+// { name: '表示名', url: '監視するURL' } の形式でオブジェクトを追加・削除してください
+const MONITORING_TARGETS = [
+  { name: 'Exampleサイト Page1', url: 'https://example.com/page1' },
+  { name: 'Example Org News', url: 'https://example.org/news' },
+  { name: 'Another Site', url: 'https://another-site.net' },
+  // 必要に応じてオブジェクトを追加してください
+];
+// 通知を送信するメールアドレス
+const NOTIFY_EMAIL_ADDRESS = Session.getActiveUser().getEmail(); // スクリプト実行者のアドレスに通知
+// --- 設定項目ここまで ---
+
+/**
+ * メイン関数: ウェブサイトの変更をチェックし、変更があれば通知します。
+ * この関数を時間主導型トリガーで定期実行します。
+ */
+function checkWebsites() {
+  // 設定項目で定義されたターゲットリストを取得
+  // nameとurlの両方が適切に設定されているオブジェクトのみをフィルタリング
+  const targets = MONITORING_TARGETS.filter(target =>
+    typeof target === 'object' &&
+    target !== null &&
+    typeof target.name === 'string' && target.name.trim() !== '' &&
+    typeof target.url === 'string' && target.url.trim() !== ''
+  );
+
+  if (targets.length === 0) {
+    Logger.log('監視対象のターゲットが MONITORING_TARGETS 配列に見つかりません。正しい形式で入力してください。');
+    return;
+  }
+
+  const scriptProperties = PropertiesService.getScriptProperties();
+
+  targets.forEach(target => {
+    const targetName = target.name;
+    const targetUrl = target.url;
+
+    Logger.log(`Checking: [${targetName}] ${targetUrl}`);
+    const currentHash = fetchContentHash(targetUrl);
+    // キーはURLを使用 (タグ名は変更される可能性があるため)
+    const previousHash = scriptProperties.getProperty(targetUrl);
+
+    if (currentHash === null) {
+      // コンテンツ取得失敗の場合はスキップ
+      Logger.log(`Failed to fetch content for: [${targetName}] ${targetUrl}`);
+      return;
+    }
+
+    if (previousHash === null) {
+      // 初回チェック時 or 以前のデータがない場合
+      Logger.log(`Initial check for [${targetName}] ${targetUrl}. Storing hash: ${currentHash}`);
+      scriptProperties.setProperty(targetUrl, currentHash);
+    } else if (currentHash !== previousHash) {
+      // ハッシュ値が変更された場合
+      Logger.log(`Change detected for [${targetName}] ${targetUrl}! Old: ${previousHash}, New: ${currentHash}`);
+      sendEmailNotification(targetName, targetUrl); // タグ名も渡す
+      // 新しいハッシュ値を保存
+      scriptProperties.setProperty(targetUrl, currentHash);
+    } else {
+      // 変更なし
+      Logger.log(`No change detected for [${targetName}] ${targetUrl}.`);
+    }
+    // GASの実行時間制限を考慮し、少し待機（ミリ秒単位）
+    Utilities.sleep(500);
+  });
+
+  Logger.log('Check finished.');
+}
+
+/**
+ * 指定されたURLのコンテンツを取得し、MD5ハッシュ値を計算して返します。
+ * 取得に失敗した場合は null を返します。
+ * @param {string} url チェック対象のURL
+ * @return {string|null} コンテンツのMD5ハッシュ値、または取得失敗時にnull
+ */
+function fetchContentHash(url) {
+  try {
+    // UrlFetchAppでコンテンツを取得
+    const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
+    const responseCode = response.getResponseCode();
+    const content = response.getContentText('UTF-8'); // 文字コードをUTF-8と仮定
+
+    if (responseCode < 200 || responseCode >= 300) {
+      Logger.log(`Error fetching ${url}: Response Code ${responseCode}`);
+      return null;
+    }
+    if (!content) {
+       Logger.log(`Error fetching ${url}: Content is empty.`);
+       return null;
+    }
+
+    const hashBytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, content, Utilities.Charset.UTF_8);
+    let hashString = '';
+    for (let i = 0; i < hashBytes.length; i++) {
+      let byte = hashBytes[i];
+      if (byte < 0) byte += 256;
+      const byteString = byte.toString(16);
+      if (byteString.length === 1) hashString += '0';
+      hashString += byteString;
+    }
+    return hashString;
+
+  } catch (error) {
+    Logger.log(`Exception fetching ${url}: ${error}`);
+    return null;
+  }
+}
+
+/**
+ * ウェブサイトの変更を通知するメールを送信します。件名にタグ名が含まれます。
+ * @param {string} name 変更が検出されたサイトのタグ名
+ * @param {string} url 変更が検出されたURL
+ */
+function sendEmailNotification(name, url) {
+  // 件名にタグ名を含める
+  const subject = `[サイト更新] ${name}`;
+  // 本文にもタグ名とURLを含める
+  const body = `以下のウェブサイトに変更が検出されました。\n\nサイト名: ${name}\nURL: ${url}\n\n確認してください。`;
+  try {
+    GmailApp.sendEmail(NOTIFY_EMAIL_ADDRESS, subject, body);
+    Logger.log(`Notification email sent to ${NOTIFY_EMAIL_ADDRESS} for [${name}] ${url}`);
+  } catch (error) {
+     Logger.log(`Failed to send email notification for [${name}] ${url}: ${error}`);
+  }
+}
